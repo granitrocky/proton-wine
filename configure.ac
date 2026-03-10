@@ -2397,7 +2397,7 @@ dnl *** Check for modules to disable by default
 
 enable_win16=${enable_win16:-i386}
 enable_vcruntime140_1=${enable_vcruntime140_1:-x86_64,arm64ec}
-+enable_wineopenxr=${enable_wineopenxr:-x86_64,arm64ec,aarch64}
+# enable_wineopenxr=${enable_wineopenxr:-x86_64,arm64ec,aarch64}
 
 if test -n "$PE_ARCHS"
 then
@@ -3349,7 +3349,7 @@ WINE_CONFIG_MAKEFILE(dlls/winegstreamer)
 WINE_CONFIG_MAKEFILE(dlls/winehid.sys)
 WINE_CONFIG_MAKEFILE(dlls/winemac.drv)
 WINE_CONFIG_MAKEFILE(dlls/winemapi)
-WINE_CONFIG_MAKEFILE(dlls/wineopenxr)
+# WINE_CONFIG_MAKEFILE(dlls/wineopenxr)
 WINE_CONFIG_MAKEFILE(dlls/wineoss.drv)
 WINE_CONFIG_MAKEFILE(dlls/wineps.drv)
 WINE_CONFIG_MAKEFILE(dlls/wineps16.drv16,enable_win16)
