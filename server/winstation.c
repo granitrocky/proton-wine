@@ -90,6 +90,7 @@ static const struct object_ops winstation_ops =
     default_unlink_name,          /* unlink_name */
     no_open_file,                 /* open_file */
     no_kernel_obj_list,           /* get_kernel_obj_list */
+    no_get_inproc_sync,        /* get_inproc_sync */
     winstation_close_handle,      /* close_handle */
     winstation_destroy            /* destroy */
 };
@@ -132,6 +133,7 @@ static const struct object_ops desktop_ops =
     default_unlink_name,          /* unlink_name */
     no_open_file,                 /* open_file */
     no_kernel_obj_list,           /* get_kernel_obj_list */
+    no_get_inproc_sync,        /* get_inproc_sync */
     desktop_close_handle,         /* close_handle */
     desktop_destroy               /* destroy */
 };
@@ -829,6 +831,27 @@ DECL_HANDLER(get_thread_desktop)
     release_object( thread );
 }
 
+/* get the thread current keyboard layout */
+DECL_HANDLER(get_thread_layout)
+{
+    struct thread *thread;
+
+    if (!(thread = get_thread_from_id( req->tid ))) return;
+    reply->layout = thread->layout;
+
+    release_object( thread );
+}
+
+/* set the thread current keyboard layout */
+DECL_HANDLER(set_thread_layout)
+{
+    struct thread *thread;
+
+    if (!(thread = get_thread_from_id( req->tid ))) return;
+    thread->layout = req->layout;
+
+    release_object( thread );
+}
 
 /* set the thread current desktop */
 DECL_HANDLER(set_thread_desktop)

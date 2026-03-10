@@ -920,7 +920,7 @@ NTSTATUS WINAPI NtCreateUserProcess( HANDLE *process_handle_ptr, HANDLE *thread_
 
     /* wait for the new process info to be ready */
 
-    NtWaitForSingleObject( process_info, FALSE, NULL );
+    wait_internal_server( process_info, FALSE, NULL );
     SERVER_START_REQ( get_new_process_info )
     {
         req->info = wine_server_obj_handle( process_info );
@@ -1996,6 +1996,33 @@ NTSTATUS WINAPI NtResumeProcess( HANDLE handle )
         ret = wine_server_call( req );
     }
     SERVER_END_REQ;
+    return ret;
+}
+
+
+/**********************************************************************
+ *           NtGetNextProcess  (NTDLL.@)
+ */
+NTSTATUS WINAPI NtGetNextProcess( HANDLE process, ACCESS_MASK access, ULONG attributes,
+                                  ULONG flags, HANDLE *handle )
+{
+    HANDLE ret_handle = 0;
+    unsigned int ret;
+
+    TRACE( "process %p, access %#x, attributes %#x, flags %#x, handle %p.\n",
+           process, (int)access, (int)attributes, (int)flags, handle );
+
+    SERVER_START_REQ( get_next_process )
+    {
+        req->last = wine_server_obj_handle( process );
+        req->access = access;
+        req->attributes = attributes;
+        req->flags = flags;
+        if (!(ret = wine_server_call( req ))) ret_handle = wine_server_ptr_handle( reply->handle );
+    }
+    SERVER_END_REQ;
+
+    *handle = ret_handle;
     return ret;
 }
 

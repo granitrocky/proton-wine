@@ -375,6 +375,7 @@ SOURCES = \
 	iimgctx.idl \
 	imagehlp.h \
 	ime.h \
+	imfbytestream_read_hack.h \
 	imm.h \
 	immdev.h \
 	imnact.idl \
@@ -633,6 +634,7 @@ SOURCES = \
 	physicalmonitorenumerationapi.h \
 	pktdef.h \
 	poppack.h \
+	powersetting.h \
 	powrprof.h \
 	prntvpt.h \
 	processthreadsapi.h \
@@ -746,6 +748,7 @@ SOURCES = \
 	srrestoreptapi.h \
 	sspi.h \
 	stamp-h.in \
+	stdole32.idl \
 	stgprop.h \
 	sti.h \
 	storage.h \
@@ -944,6 +947,7 @@ SOURCES = \
 	wine/mscvpdb.h \
 	wine/mssign.h \
 	wine/nsi.h \
+	wine/ntsync.h \
 	wine/orpc.idl \
 	wine/plugplay.idl \
 	wine/rbtree.h \

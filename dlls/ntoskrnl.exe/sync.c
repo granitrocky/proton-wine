@@ -196,10 +196,9 @@ static void *create_event_object( HANDLE handle )
     return event;
 }
 
-static const WCHAR event_type_name[] = {'E','v','e','n','t',0};
-
 static struct _OBJECT_TYPE event_type = {
-    event_type_name,
+    {},
+    RTL_CONSTANT_STRING( L"Event" ),
     create_event_object
 };
 
@@ -384,11 +383,10 @@ LONG WINAPI KeReleaseSemaphore( PRKSEMAPHORE semaphore, KPRIORITY increment,
     return ret;
 }
 
-static const WCHAR semaphore_type_name[] = {'S','e','m','a','p','h','o','r','e',0};
-
 static struct _OBJECT_TYPE semaphore_type =
 {
-    semaphore_type_name
+    {},
+    RTL_CONSTANT_STRING( L"Semaphore" )
 };
 
 POBJECT_TYPE ExSemaphoreObjectType = &semaphore_type;
@@ -430,13 +428,64 @@ LONG WINAPI KeReleaseMutex( PRKMUTEX mutex, BOOLEAN wait )
 /***********************************************************************
  *           KeInitializeGuardedMutex   (NTOSKRNL.EXE.@)
  */
-void WINAPI KeInitializeGuardedMutex(PKGUARDED_MUTEX mutex)
+DEFINE_FASTCALL1_WRAPPER(KeInitializeGuardedMutex)
+void FASTCALL KeInitializeGuardedMutex(PKGUARDED_MUTEX mutex)
 {
     TRACE("mutex %p.\n", mutex);
     mutex->Count = FM_LOCK_BIT;
     mutex->Owner = NULL;
     mutex->Contention = 0;
     KeInitializeEvent(&mutex->Event, SynchronizationEvent, FALSE);
+}
+
+/***********************************************************************
+ *           KeAcquireGuardedMutexUnsafe   (NTOSKRNL.EXE.@)
+ */
+DEFINE_FASTCALL1_WRAPPER(KeAcquireGuardedMutexUnsafe)
+void FASTCALL KeAcquireGuardedMutexUnsafe(PKGUARDED_MUTEX mutex)
+{
+    LONG count;
+
+    TRACE("mutex %p.\n", mutex);
+
+    count = InterlockedDecrement( &mutex->Count );
+    if (count < 0)
+        KeWaitForSingleObject( &mutex->Event, Executive, KernelMode, FALSE, NULL );
+}
+
+/***********************************************************************
+ *           KeAcquireGuardedMutex   (NTOSKRNL.EXE.@)
+ */
+DEFINE_FASTCALL1_WRAPPER(KeAcquireGuardedMutex)
+void FASTCALL KeAcquireGuardedMutex(PKGUARDED_MUTEX mutex)
+{
+    /* FIXME: Enter Guarded Region */
+    KeAcquireGuardedMutexUnsafe(mutex);
+}
+
+/***********************************************************************
+ *           KeReleaseGuardedMutexUnsafe   (NTOSKRNL.EXE.@)
+ */
+DEFINE_FASTCALL1_WRAPPER(KeReleaseGuardedMutexUnsafe)
+void FASTCALL KeReleaseGuardedMutexUnsafe(PKGUARDED_MUTEX mutex)
+{
+    LONG count;
+
+    TRACE("mutex %p.\n", mutex);
+
+    count = InterlockedIncrement( &mutex->Count );
+    if (count < 1)
+        KeSetEvent( &mutex->Event, IO_NO_INCREMENT, FALSE );
+}
+
+/***********************************************************************
+ *           KeReleaseGuardedMutex   (NTOSKRNL.EXE.@)
+ */
+DEFINE_FASTCALL1_WRAPPER(KeReleaseGuardedMutex)
+void FASTCALL KeReleaseGuardedMutex(PKGUARDED_MUTEX mutex)
+{
+    KeReleaseGuardedMutexUnsafe(mutex);
+    /* FIXME: Leave Guarded Region */
 }
 
 static void CALLBACK ke_timer_complete_proc(PTP_CALLBACK_INSTANCE instance, void *timer_, PTP_TIMER tp_timer)

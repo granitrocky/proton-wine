@@ -64,6 +64,7 @@ static const char devpropkey_device_ispresentA[] = "Properties\\{540B947E-8B40-4
 static const char devpropkey_monitor_gpu_luidA[] = "Properties\\{CA085853-16CE-48AA-B114-DE9C72334223}\\0001";
 static const char devpropkey_monitor_output_idA[] = "Properties\\{CA085853-16CE-48AA-B114-DE9C72334223}\\0002";
 static const char wine_devpropkey_monitor_rcworkA[] = "Properties\\{233a9ef3-afc4-4abd-b564-c32f21f1535b}\\0004";
+static const char wine_devpropkey_monitor_hdr_enabledA[] = "Properties\\{233a9ef3-afc4-4abd-b564-c32f21f1535b}\\0006";
 
 static const WCHAR linkedW[] = {'L','i','n','k','e','d',0};
 static const WCHAR symbolic_link_valueW[] =
@@ -155,6 +156,7 @@ struct monitor
     RECT rc_work;
     BOOL is_clone;
     struct edid_monitor_info edid_info;
+    BOOL hdr_enabled;
 };
 
 static struct list gpus = LIST_INIT(gpus);
@@ -756,6 +758,16 @@ static BOOL read_monitor_from_registry( struct monitor *monitor )
             get_monitor_info_from_edid( &monitor->edid_info, value->Data, value->DataLength );
         NtClose( subkey );
     }
+
+    /* WINE_DEVPROPKEY_MONITOR_HDR_ENABLED */
+    size = query_reg_subkey_value( hkey, wine_devpropkey_monitor_hdr_enabledA,
+                                   value, sizeof(buffer) );
+    if (size != sizeof(monitor->hdr_enabled))
+    {
+        NtClose( hkey );
+        return FALSE;
+    }
+    monitor->hdr_enabled = *(const BOOL *)value->Data;
 
     NtClose( hkey );
     return TRUE;
@@ -1633,6 +1645,14 @@ static BOOL write_monitor_to_registry( struct monitor *monitor, const BYTE *edid
         NtClose( subkey );
     }
 
+    /* WINE_DEVPROPKEY_MONITOR_HDR_ENABLED */
+    if ((subkey = reg_create_ascii_key( hkey, wine_devpropkey_monitor_hdr_enabledA, 0, NULL )))
+    {
+        set_reg_value( subkey, NULL, 0xffff0000 | DEVPROP_TYPE_BOOLEAN,
+                       &monitor->hdr_enabled, sizeof(monitor->hdr_enabled) );
+        NtClose( subkey );
+    }
+
     NtClose( hkey );
 
 
@@ -1662,6 +1682,7 @@ static void add_monitor( const struct gdi_monitor *gdi_monitor, void *param )
     monitor->id = source->monitor_count;
     monitor->output_id = ctx->monitor_count;
     monitor->rc_work = gdi_monitor->rc_work;
+    monitor->hdr_enabled = gdi_monitor->hdr_enabled;
 
     TRACE( "%u %s %s\n", monitor->id, wine_dbgstr_rect(&gdi_monitor->rc_monitor), wine_dbgstr_rect(&gdi_monitor->rc_work) );
 
@@ -1687,6 +1708,109 @@ static void add_monitor( const struct gdi_monitor *gdi_monitor, void *param )
         source->monitor_count++;
         ctx->monitor_count++;
     }
+}
+
+/* Return whether fsr should be used */
+BOOL fs_hack_is_fsr(void)
+{
+    static int is_fsr = -1;
+    if (is_fsr < 0)
+    {
+        const char *e = getenv("WINE_FULLSCREEN_FSR");
+        is_fsr = e && strcmp(e, "0");
+    }
+    TRACE("is_fsr: %s\n", is_fsr ? "TRUE" : "FALSE");
+    return is_fsr;
+}
+
+static BOOL get_fsr_single_mode( UINT *mode )
+{
+    static int cached = -1;
+    const char *e;
+    if ( cached != -1 )
+    {
+        *mode = cached;
+        return TRUE;
+    }
+
+    if ( (e = getenv("WINE_FULLSCREEN_FSR_MODE")) )
+    {
+        /* If empty or zero don't apply a mode */
+        if (*e == '\0' || *e == '0')
+            return FALSE;
+        /* The 'mode' values should be in sync with the order in 'fsr_ratios' */
+        if ( !strcmp(e, "Ultra") || !strcmp(e, "ultra") )                   cached = 3;
+        else if ( !strcmp(e, "Quality") || !strcmp(e, "quality") )          cached = 2;
+        else if ( !strcmp(e, "Balanced") || !strcmp(e, "balanced") )        cached = 1;
+        else if ( !strcmp(e, "Performance") || !strcmp(e, "performance") )  cached = 0;
+        /* If the user mistyped the mode, return 'balanced' */
+        else cached = 1;
+        *mode = cached;
+        TRACE("found single mode: %d\n", cached);
+        return TRUE;
+    }
+    return FALSE;
+}
+
+static BOOL get_fsr_custom_mode( SIZE *size )
+{
+    static LONG width = 0, height = 0;
+    const char *e;
+    if ( width && height )
+    {
+        size->cx = width;
+        size->cy = height;
+        return TRUE;
+    }
+    if ( (e = getenv("WINE_FULLSCREEN_FSR_CUSTOM_MODE")) )
+    {
+        const int n = sscanf(e, "%ux%u", &width, &height);
+        if ( n == 2 )
+        {
+            size->cx = width;
+            size->cy = height;
+            TRACE("found custom size: %dx%d\n", size->cx, size->cy);
+            return TRUE;
+        }
+    }
+    return FALSE;
+}
+
+static float get_fsr_h_ratio(SIZE devmode)
+{
+    float h_ratio = 0.0f;
+    if (devmode.cx / 16.0f == devmode.cy / 9.0f)        h_ratio = 9.0f;                     /* 16:9 resolutions */
+    else if ((DWORD)(devmode.cx / 210.0f) == (DWORD)(devmode.cy / 90.0f)) h_ratio = 9.0f;   /* 21:9 ultra-wide resolutions */
+    else if (devmode.cx / 32.0f == devmode.cy / 9.0f)   h_ratio = 9.0f;                     /* 32:9 "duper-ultra-wide" resolutions */
+    else if (devmode.cx / 8.0f == devmode.cy / 5.0f)    h_ratio = 10.0f;                    /* 16:10 resolutions */
+    else if (devmode.cx / 12.0f == devmode.cy / 5.0f)   h_ratio = 10.0f;                    /* 24:10 resolutions */
+    else h_ratio = 1.0f;    /* In case of unknown ratio, naively create FSR resolutions */
+    return h_ratio;
+}
+
+static SIZE get_fsr_size(SIZE devmode, float factor)
+{
+    float h_ratio, real_w_ratio;
+    SIZE fsr_size;
+
+    h_ratio = get_fsr_h_ratio(devmode);
+    real_w_ratio = devmode.cx / (devmode.cy / h_ratio);
+    if (h_ratio == 1.0f)
+    {
+        /* Naive generation (matches AMD mode documentation but not sample code) */
+        /* AMD's sample rounds down, which doesn't match their published list of resolutions */
+        fsr_size.cy = (LONG)(devmode.cy / factor + 0.5f);
+        fsr_size.cx = (LONG)(fsr_size.cy * ((float)devmode.cx / (float)devmode.cy) + 0.5f);
+    }
+    else
+    {
+        /* Round to nearest integer (our way) */
+        float h_factor = (LONG) ((devmode.cy / h_ratio) / factor + 0.5f);
+        fsr_size.cx = (LONG)(real_w_ratio * h_factor + 0.5f);
+        fsr_size.cy = (LONG)(h_ratio * h_factor + 0.5f);
+    }
+    TRACE("calculated size: %ux%u, ratio: %1.1f\n", fsr_size.cx, fsr_size.cy, factor);
+    return fsr_size;
 }
 
 static UINT add_screen_size( SIZE *sizes, UINT count, SIZE size )
@@ -1722,6 +1846,7 @@ static SIZE *get_screen_sizes( const DEVMODEW *maximum, const DEVMODEW *modes, U
         {2880, 1620},
         {3200, 1800},
         /* 16:10 */
+        {1280,  800},
         {1440,  900},
         {1680, 1050},
         {1920, 1200},
@@ -1745,13 +1870,37 @@ static SIZE *get_screen_sizes( const DEVMODEW *maximum, const DEVMODEW *modes, U
 
     const char *env;
 
+    static SIZE fsr_sizes[4] = {0};
+    SIZE fsr_custom_size = {0, 0};
+    UINT fsr_single_mode = 0;
+    const BOOL is_fsr = fs_hack_is_fsr();
+    const BOOL is_custom_mode = get_fsr_custom_mode( &fsr_custom_size );
+    const BOOL is_single_mode = get_fsr_single_mode( &fsr_single_mode );
+
     count = 1 + ARRAY_SIZE(default_sizes) + ARRAY_SIZE(lowres_sizes) + modes_count;
+    count += ARRAY_SIZE(fsr_sizes);
     if (!(sizes = malloc( count * sizeof(*sizes) ))) return NULL;
 
     count = add_screen_size( sizes, 0, max_size );
+
+    if ( is_fsr )
+    {
+        if ( !fsr_sizes[0].cx || !fsr_sizes[0].cy )
+        {
+            fsr_sizes[0] = get_fsr_size(max_size, 2.0f);   /* FSR Performance */
+            fsr_sizes[1] = get_fsr_size(max_size, 1.7f);   /* FSR Balanced */
+            fsr_sizes[2] = get_fsr_size(max_size, 1.5f);   /* FSR Quality */
+            fsr_sizes[3] = get_fsr_size(max_size, 1.3f);   /* FSR Ultra Quality */
+        }
+        if ( !is_custom_mode && is_single_mode ) fsr_custom_size = fsr_sizes[fsr_single_mode];
+    }
+
     for (i = 0; i < ARRAY_SIZE(default_sizes); i++)
     {
         if (default_sizes[i].cx > max_size.cx || default_sizes[i].cy > max_size.cy) continue;
+        /* Don't report modes larger than the requested FSR single mode or custom size */
+        if (fsr_custom_size.cx && default_sizes[i].cx > fsr_custom_size.cx) continue;
+        if (fsr_custom_size.cy && default_sizes[i].cy > fsr_custom_size.cy) continue;
         count += add_screen_size( sizes, count, default_sizes[i] );
     }
 
@@ -1762,12 +1911,33 @@ static SIZE *get_screen_sizes( const DEVMODEW *maximum, const DEVMODEW *modes, U
         count += ARRAY_SIZE(lowres_sizes);
     }
 
+    if ( is_fsr )
+    {
+        if ( is_custom_mode || is_single_mode )
+        {
+            if ( enable_lowres || (fsr_custom_size.cx > 800 && fsr_custom_size.cy > 600) )
+                count += add_screen_size( sizes, count, fsr_custom_size );
+        }
+        else
+        {
+            for (i = 0; i < ARRAY_SIZE(fsr_sizes); i++)
+            {
+                if ( fsr_sizes[i].cx < 800 && !enable_lowres ) continue;;
+                if ( fsr_sizes[i].cy < 600 && !enable_lowres ) continue;;
+                count += add_screen_size( sizes, count, fsr_sizes[i] );
+            }
+        }
+    }
+
     for (mode = modes; mode && modes_count; mode = NEXT_DEVMODEW(mode), modes_count--)
     {
         UINT width = devmode_get( mode, DM_PELSWIDTH ), height = devmode_get( mode, DM_PELSHEIGHT );
         SIZE size = {.cx = max( width, height ), .cy = min( width, height )};
         if (!size.cx || (size.cx < 800 && !enable_lowres) || size.cx > max_size.cx) continue;
         if (!size.cy || (size.cy < 600 && !enable_lowres) || size.cy > max_size.cy) continue;
+        /* Don't report modes larger than the requested FSR single mode or custom size */
+        if (fsr_custom_size.cx && default_sizes[i].cx > fsr_custom_size.cx) continue;
+        if (fsr_custom_size.cy && default_sizes[i].cy > fsr_custom_size.cy) continue;
         count += add_screen_size( sizes, count, size );
     }
 
@@ -5757,6 +5927,13 @@ void sysparams_init(void)
         emulate_modeset = !IS_OPTION_TRUE( buffer[0] );
 
     {
+        const char *decorate = NULL;
+
+        decorate = getenv( "WINE_NO_WM_DECORATION" );
+        if (decorate && decorate[0] == '1') decorated_mode = FALSE;
+    }
+
+    {
         const char *s;
 
         if ((s = getenv( "PROTON_LIMIT_RESOLUTIONS" )))
@@ -7194,6 +7371,16 @@ BOOL WINAPI NtUserMessageBeep( UINT type )
     return TRUE;
 }
 
+/***********************************************************************
+ *	     NtUserSetAdditionalForegroundBoostProcesses    (win32u.@)
+ */
+BOOL WINAPI NtUserSetAdditionalForegroundBoostProcesses( HWND hwnd, DWORD count, HANDLE *handles )
+{
+    FIXME( "%p %u %p stub!\n", hwnd, (unsigned int)count, handles );
+    RtlSetLastWin32Error( ERROR_CALL_NOT_IMPLEMENTED );
+    return FALSE;
+}
+
 static DWORD exiting_thread_id;
 
 /**********************************************************************
@@ -7618,29 +7805,58 @@ NTSTATUS WINAPI NtUserDisplayConfigGetDeviceInfo( DISPLAYCONFIG_DEVICE_INFO_HEAD
     }
     case DISPLAYCONFIG_DEVICE_INFO_GET_ADVANCED_COLOR_INFO:
     {
-        DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO *info = (DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO *)packet;
+        DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO *color_info = (DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO *)packet;
+        struct monitor *monitor;
         const char *env;
 
         FIXME( "DISPLAYCONFIG_DEVICE_INFO_GET_ADVANCED_COLOR_INFO semi-stub.\n" );
 
-        if (packet->size < sizeof(*info))
+        if (packet->size < sizeof(*color_info))
             return STATUS_INVALID_PARAMETER;
 
-        info->advancedColorSupported = 0;
-        info->advancedColorEnabled = 0;
-        info->wideColorEnforced = 0;
-        info->advancedColorForceDisabled = 0;
-        info->colorEncoding = DISPLAYCONFIG_COLOR_ENCODING_RGB;
-        info->bitsPerColorChannel = 8;
         if ((env = getenv("DXVK_HDR")) && *env == '1')
         {
-            TRACE( "HDR is enabled.\n" );
-            info->advancedColorSupported = 1;
-            info->advancedColorEnabled = 1;
-            info->bitsPerColorChannel = 10;
+            color_info->advancedColorSupported = 1;
+            color_info->advancedColorEnabled = 1;
+            color_info->wideColorEnforced = 0;
+            color_info->advancedColorForceDisabled = 0;
+            color_info->colorEncoding = DISPLAYCONFIG_COLOR_ENCODING_RGB;
+            color_info->bitsPerColorChannel = 10;
+
+            return STATUS_SUCCESS;
         }
 
-        return STATUS_SUCCESS;
+        if (!lock_display_devices( FALSE )) return STATUS_UNSUCCESSFUL;
+
+        LIST_FOR_EACH_ENTRY(monitor, &monitors, struct monitor, entry)
+        {
+            if (color_info->header.id != monitor->output_id) continue;
+            if (memcmp( &color_info->header.adapterId, &monitor->source->gpu->luid,
+                        sizeof(monitor->source->gpu->luid) ))
+                continue;
+
+            if (monitor->hdr_enabled)
+            {
+                color_info->advancedColorSupported = 1;
+                color_info->advancedColorEnabled = 1;
+                color_info->bitsPerColorChannel = 10;
+            }
+            else
+            {
+                color_info->advancedColorSupported = 0;
+                color_info->advancedColorEnabled = 0;
+                color_info->bitsPerColorChannel = 8;
+            }
+            color_info->wideColorEnforced = 0;
+            color_info->advancedColorForceDisabled = 0;
+            color_info->colorEncoding = DISPLAYCONFIG_COLOR_ENCODING_RGB;
+
+            ret = STATUS_SUCCESS;
+            break;
+        }
+
+        unlock_display_devices();
+        return ret;
     }
     case DISPLAYCONFIG_DEVICE_INFO_SET_TARGET_PERSISTENCE:
     case DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_BASE_TYPE:

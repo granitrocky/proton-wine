@@ -636,6 +636,7 @@
 @ stdcall -import GetCurrentConsoleFontEx(long long ptr)
 @ stdcall -import GetCurrentDirectoryA(long ptr)
 @ stdcall -import GetCurrentDirectoryW(long ptr)
+@ stdcall GetCurrentApplicationUserModelId(ptr ptr) kernelbase.GetCurrentApplicationUserModelId
 @ stdcall GetCurrentPackageFamilyName(ptr ptr) kernelbase.GetCurrentPackageFamilyName
 @ stdcall GetCurrentPackageFullName(ptr ptr) kernelbase.GetCurrentPackageFullName
 @ stdcall GetCurrentPackageId(ptr ptr) kernelbase.GetCurrentPackageId
@@ -1008,6 +1009,7 @@
 @ stdcall -import IsDBCSLeadByte(long)
 @ stdcall -import IsDBCSLeadByteEx(long long)
 @ stdcall -import IsDebuggerPresent()
+@ stdcall -import IsEnclaveTypeSupported(long)
 @ stub -i386 IsLSCallback
 @ stdcall -import IsNLSDefinedString(long long ptr wstr long)
 @ stdcall -import IsNormalizedString(long wstr long)
@@ -1017,6 +1019,7 @@
 @ stdcall IsSystemResumeAutomatic()
 @ stdcall -import IsThreadAFiber()
 @ stdcall IsThreadpoolTimerSet(ptr) NTDLL.TpIsTimerSet
+@ stdcall IsUserCetAvailableInEnvironment(long)
 # @ stub IsTimeZoneRedirectionEnabled
 # @ stub IsValidCalDateTime
 @ stdcall -import IsValidCodePage(long)
@@ -1508,6 +1511,7 @@
 @ stdcall SetThreadpoolThreadMaximum(ptr long) NTDLL.TpSetPoolMaxThreads
 @ stdcall SetThreadpoolThreadMinimum(ptr long) NTDLL.TpSetPoolMinThreads
 @ stdcall SetThreadpoolTimer(ptr ptr long long) NTDLL.TpSetTimer
+@ stdcall SetThreadpoolTimerEx(ptr ptr long long) NTDLL.TpSetTimer
 @ stdcall SetThreadpoolWait(ptr long ptr) NTDLL.TpSetWait
 @ stdcall -import SetTimeZoneInformation(ptr)
 @ stub SetTimerQueueTimer
@@ -1613,6 +1617,7 @@
 @ stdcall -import VirtualLock(ptr long)
 @ stdcall -import VirtualProtect(ptr long long ptr)
 @ stdcall -import VirtualProtectEx(long ptr long long ptr)
+@ stdcall -import VirtualProtectFromApp(ptr long long ptr)
 @ stdcall -import VirtualQuery(ptr ptr long)
 @ stdcall -import VirtualQueryEx(long ptr ptr long)
 @ stdcall -import VirtualUnlock(ptr long)
@@ -1717,6 +1722,7 @@
 @ stdcall -import lstrlen(str)
 @ stdcall -import lstrlenA(str)
 @ stdcall -import lstrlenW(wstr)
+@ stdcall timeGetTime()
 
 ################################################################
 # Wine internal extensions

@@ -288,18 +288,22 @@ UINT WINAPI MapVirtualKeyW(UINT code, UINT maptype)
  */
 UINT WINAPI MapVirtualKeyExA(UINT code, UINT maptype, HKL hkl)
 {
+    UINT top_bit = 0;
     UINT ret;
 
     ret = NtUserMapVirtualKeyEx( code, maptype, hkl );
     if (maptype == MAPVK_VK_TO_CHAR)
     {
         BYTE ch = 0;
-        WCHAR wch = ret;
+        WCHAR wch;
+
+        top_bit = ret & (1u << 31);
+        wch = ret & ~top_bit;
 
         WideCharToMultiByte( CP_ACP, 0, &wch, 1, (LPSTR)&ch, 1, NULL, NULL );
         ret = ch;
     }
-    return ret;
+    return ret | top_bit;
 }
 
 /****************************************************************************
@@ -468,7 +472,6 @@ BOOL WINAPI UnloadKeyboardLayout( HKL layout )
     SetLastError( ERROR_CALL_NOT_IMPLEMENTED );
     return FALSE;
 }
-
 
 static DWORD CALLBACK devnotify_window_callbackW(HANDLE handle, DWORD flags, DEV_BROADCAST_HDR *header)
 {
@@ -826,6 +829,29 @@ BOOL WINAPI SetGestureConfig( HWND hwnd, DWORD reserved, UINT count,
 {
     FIXME( "handle %p, reserved %#lx, count %u, config %p, size %u stub!\n",
            hwnd, reserved, count, config, size );
+    SetLastError( ERROR_CALL_NOT_IMPLEMENTED );
+    return FALSE;
+}
+
+BOOL WINAPI GetPointerDeviceProperties( HANDLE device, UINT32 *count,
+                                        POINTER_DEVICE_PROPERTY *properties)
+{
+    FIXME( "device %p, count %p, info %p stub!\n", device, count, properties );
+    SetLastError( ERROR_CALL_NOT_IMPLEMENTED );
+    return FALSE;
+}
+
+BOOL WINAPI GetPointerDeviceRects( HANDLE device, RECT *device_rect, RECT *display_rect )
+{
+    FIXME( "device %p, device_rect %p, display_rect %p stub!\n",
+           device, device_rect, display_rect );
+    SetLastError( ERROR_CALL_NOT_IMPLEMENTED );
+    return FALSE;
+}
+
+BOOL WINAPI GetPointerPenInfo( UINT32 id, POINTER_PEN_INFO *info )
+{
+    FIXME( "id %u, info %p stub!\n", id, info );
     SetLastError( ERROR_CALL_NOT_IMPLEMENTED );
     return FALSE;
 }

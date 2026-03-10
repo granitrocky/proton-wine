@@ -27,12 +27,14 @@
 #include "setjmp.h"
 #include "wine/test.h"
 
+static NTSTATUS (WINAPI *pNtAlertMultipleThreadByThreadId)( HANDLE *, ULONG, void *, void * );
 static NTSTATUS (WINAPI *pNtAlertThreadByThreadId)( HANDLE );
 static NTSTATUS (WINAPI *pNtClose)( HANDLE );
 static NTSTATUS (WINAPI *pNtCreateEvent) ( PHANDLE, ACCESS_MASK, const OBJECT_ATTRIBUTES *, EVENT_TYPE, BOOLEAN);
 static NTSTATUS (WINAPI *pNtCreateKeyedEvent)( HANDLE *, ACCESS_MASK, const OBJECT_ATTRIBUTES *, ULONG );
 static NTSTATUS (WINAPI *pNtCreateMutant)( HANDLE *, ACCESS_MASK, const OBJECT_ATTRIBUTES *, BOOLEAN );
 static NTSTATUS (WINAPI *pNtCreateSemaphore)( HANDLE *, ACCESS_MASK, const OBJECT_ATTRIBUTES *, LONG, LONG );
+static NTSTATUS (WINAPI *pNtDelayExecution)( BOOLEAN, const LARGE_INTEGER * );
 static NTSTATUS (WINAPI *pNtOpenEvent)( HANDLE *, ACCESS_MASK, const OBJECT_ATTRIBUTES * );
 static NTSTATUS (WINAPI *pNtOpenKeyedEvent)( HANDLE *, ACCESS_MASK, const OBJECT_ATTRIBUTES * );
 static NTSTATUS (WINAPI *pNtPulseEvent)( HANDLE, LONG * );
@@ -774,12 +776,22 @@ static DWORD WINAPI tid_alert_thread( void *arg )
     return 0;
 }
 
+static DWORD WINAPI tid_wait_alert_thread( void *arg )
+{
+    NTSTATUS ret;
+
+    ret = pNtWaitForAlertByThreadId( (void *)0x123, NULL );
+    ok(ret == STATUS_ALERTED, "got %#lx\n", ret);
+    return 0;
+}
+
 static void test_tid_alert( char **argv )
 {
     LARGE_INTEGER timeout = {{0}};
     char cmdline[MAX_PATH];
     STARTUPINFOA si = {0};
     PROCESS_INFORMATION pi;
+    HANDLE tids[2];
     HANDLE thread;
     NTSTATUS ret;
     DWORD tid;
@@ -840,6 +852,43 @@ static void test_tid_alert( char **argv )
     ok(!WaitForSingleObject( pi.hProcess, 1000 ), "wait failed\n");
     CloseHandle( pi.hProcess );
     CloseHandle( pi.hThread );
+
+    if (!pNtAlertMultipleThreadByThreadId)
+    {
+        win_skip( "NtAlertMultipleThreadByThreadId is not avaliable.\n" );
+        return;
+    }
+
+    timeout.QuadPart = 0;
+    ret = pNtAlertMultipleThreadByThreadId( NULL, 0, NULL, NULL );
+    ok( !ret, "got %#lx.\n", ret );
+    ret = pNtAlertMultipleThreadByThreadId( NULL, 1, NULL, NULL );
+    ok( ret == STATUS_ACCESS_VIOLATION, "got %#lx.\n", ret );
+
+    ret = pNtWaitForAlertByThreadId( (HANDLE)(ULONG_PTR)GetCurrentThreadId(), &timeout );
+    ok(ret == STATUS_TIMEOUT, "got %#lx\n", ret);
+    tids[0] = (HANDLE)(ULONG_PTR)GetCurrentThreadId();
+    tids[1] = (HANDLE)0xdeadbeef;
+    ret = pNtAlertMultipleThreadByThreadId( tids, 2, NULL, NULL );
+    ok( ret == STATUS_INVALID_CID, "got %#lx.\n", ret );
+    ret = pNtWaitForAlertByThreadId( (HANDLE)(ULONG_PTR)GetCurrentThreadId(), &timeout );
+    ok(ret == STATUS_TIMEOUT, "got %#lx\n", ret);
+    tids[1] = tids[0];
+    ret = pNtAlertMultipleThreadByThreadId( tids, 2, NULL, NULL );
+    ok( !ret, "got %#lx.\n", ret );
+    ret = pNtWaitForAlertByThreadId( (HANDLE)(ULONG_PTR)GetCurrentThreadId(), &timeout );
+    ok(ret == STATUS_ALERTED, "got %#lx\n", ret);
+    ret = pNtWaitForAlertByThreadId( (HANDLE)(ULONG_PTR)GetCurrentThreadId(), &timeout );
+    ok(ret == STATUS_TIMEOUT, "got %#lx\n", ret);
+
+    thread = CreateThread( NULL, 0, tid_wait_alert_thread, (HANDLE)(DWORD_PTR)GetCurrentThreadId(), 0, &tid );
+    tids[1] = (HANDLE)(ULONG_PTR)tid;
+    ret = pNtAlertMultipleThreadByThreadId( tids, 2, NULL, NULL );
+    ok( !ret, "got %#lx.\n", ret );
+    ret = pNtWaitForAlertByThreadId( (HANDLE)(ULONG_PTR)GetCurrentThreadId(), &timeout );
+    ok(ret == STATUS_ALERTED, "got %#lx\n", ret);
+    WaitForSingleObject( thread, INFINITE );
+    CloseHandle( thread );
 }
 
 struct test_completion_port_scheduling_param
@@ -1271,6 +1320,105 @@ static void test_barrier(void)
         }
         ok( *p.count == p.thread_count, "got %ld.\n", *p.count );
         ok( true_ret_count == 1, "got %ld.\n", true_ret_count );
+
+        winetest_pop_context();
+    }
+}
+
+/* An overview of possible combinations and return values:
+ * - Non-alertable, zero timeout: STATUS_SUCCESS or STATUS_NO_YIELD_PERFORMED
+ * - Non-alertable, non-zero timeout: STATUS_SUCCESS
+ * - Alertable, zero timeout: STATUS_SUCCESS, STATUS_NO_YIELD_PERFORMED, or STATUS_USER_APC
+ * - Alertable, non-zero timeout: STATUS_SUCCESS or STATUS_USER_APC
+ * - Sleep/SleepEx don't modify LastError, no matter what
+ */
+
+static VOID CALLBACK apc_proc( ULONG_PTR param )
+{
+    InterlockedIncrement( (LONG *)param );
+}
+
+static void test_delayexecution(void)
+{
+    static const struct
+    {
+        BOOLEAN alertable;
+        LONGLONG timeout;
+        BOOLEAN queue_apc;
+        const char *desc;
+    } tests[] =
+    {
+        { FALSE, 0,      FALSE, "non-alertable yield" },
+        { FALSE, -10000, FALSE, "non-alertable sleep" },
+        { TRUE,  0,      FALSE, "alertable yield" },
+        { TRUE,  -10000, FALSE, "alertable sleep" },
+        { TRUE,  0,      TRUE,  "alertable yield with APC" },
+        { TRUE,  -10000, TRUE,  "alertable sleep with APC" },
+    };
+    unsigned int i;
+    LARGE_INTEGER timeout;
+    ULONG apc_count;
+    NTSTATUS status;
+    DWORD ret;
+
+    for (i = 0; i < ARRAY_SIZE(tests); i++)
+    {
+        winetest_push_context("%s", tests[i].desc);
+        timeout.QuadPart = tests[i].timeout;
+
+        apc_count = 0;
+        if (tests[i].queue_apc)
+            QueueUserAPC( apc_proc, GetCurrentThread(), (ULONG_PTR)&apc_count );
+
+        /* test NtDelayExecution */
+        SetLastError( 0xdeadbeef );
+        status = pNtDelayExecution( tests[i].alertable, &timeout );
+        ok( GetLastError() == 0xdeadbeef, "got error %#lx.\n", GetLastError() );
+
+        if (tests[i].alertable && tests[i].queue_apc)
+        {
+            ok( status == STATUS_USER_APC, "got status %#lx.\n", status );
+            ok( apc_count, "got 0.\n" );
+        }
+        else
+        {
+            ok( status == STATUS_SUCCESS || (!tests[i].timeout && status == STATUS_NO_YIELD_PERFORMED),
+                "got status %#lx.\n", status );
+        }
+
+        if (tests[i].queue_apc) /* don't leave leftover APCs */
+            SleepEx( 0, TRUE );
+
+        /* test SleepEx */
+        apc_count = 0;
+        if (tests[i].queue_apc)
+            QueueUserAPC( apc_proc, GetCurrentThread(), (ULONG_PTR)&apc_count );
+
+        SetLastError( 0xdeadbeef );
+        ret = SleepEx( timeout.QuadPart ? (-timeout.QuadPart / 10000) : 0, tests[i].alertable );
+        ok( GetLastError() == 0xdeadbeef, "got error %#lx.\n", GetLastError() );
+
+        if (tests[i].alertable && tests[i].queue_apc)
+        {
+            ok( ret == WAIT_IO_COMPLETION, "got %lu.\n", ret );
+            ok( apc_count, "got 0.\n" );
+        }
+        else
+        {
+            ok( !ret, "got %lu.\n", ret );
+        }
+
+        if (tests[i].queue_apc)
+            SleepEx( 0, TRUE );
+
+        /* test Sleep (non-alertable only) */
+        if (!tests[i].alertable)
+        {
+            SetLastError( 0xdeadbeef );
+            Sleep( timeout.QuadPart ? (-timeout.QuadPart / 10000) : 0 );
+            ok( GetLastError() == 0xdeadbeef, "got error %#lx.\n", GetLastError() );
+        }
+
         winetest_pop_context();
     }
 }
@@ -1285,12 +1433,14 @@ START_TEST(sync)
 
     if (argc > 2) return;
 
+    pNtAlertMultipleThreadByThreadId = (void *)GetProcAddress(module, "NtAlertMultipleThreadByThreadId");
     pNtAlertThreadByThreadId        = (void *)GetProcAddress(module, "NtAlertThreadByThreadId");
     pNtClose                        = (void *)GetProcAddress(module, "NtClose");
     pNtCreateEvent                  = (void *)GetProcAddress(module, "NtCreateEvent");
     pNtCreateKeyedEvent             = (void *)GetProcAddress(module, "NtCreateKeyedEvent");
     pNtCreateMutant                 = (void *)GetProcAddress(module, "NtCreateMutant");
     pNtCreateSemaphore              = (void *)GetProcAddress(module, "NtCreateSemaphore");
+    pNtDelayExecution               = (void *)GetProcAddress(module, "NtDelayExecution");
     pNtOpenEvent                    = (void *)GetProcAddress(module, "NtOpenEvent");
     pNtOpenKeyedEvent               = (void *)GetProcAddress(module, "NtOpenKeyedEvent");
     pNtPulseEvent                   = (void *)GetProcAddress(module, "NtPulseEvent");
@@ -1327,4 +1477,5 @@ START_TEST(sync)
     test_tid_alert( argv );
     test_completion_port_scheduling();
     test_barrier();
+    test_delayexecution();
 }

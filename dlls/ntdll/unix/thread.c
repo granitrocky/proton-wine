@@ -1473,11 +1473,15 @@ void abort_thread( int status )
 }
 
 
+extern void delete_eac_wine_pid(void);
+
+
 /***********************************************************************
  *           abort_process
  */
 void abort_process( int status )
 {
+    delete_eac_wine_pid();
     _exit( get_unix_exit_code( status ));
 }
 
@@ -1680,6 +1684,8 @@ NTSTATUS WINAPI NtSuspendThread( HANDLE handle, ULONG *ret_count )
     if (ret == STATUS_PENDING && wait_handle)
     {
         NtWaitForSingleObject( wait_handle, FALSE, NULL );
+        /* remove the handle from the cache, get_thread_context will close it for us */
+        close_inproc_sync_obj( wait_handle );
 
         SERVER_START_REQ( suspend_thread )
         {
@@ -1854,7 +1860,7 @@ NTSTATUS get_thread_context( HANDLE handle, void *context, BOOL *self, USHORT ma
 
     if (ret == STATUS_PENDING)
     {
-        NtWaitForSingleObject( context_handle, FALSE, NULL );
+        wait_internal_server( context_handle, FALSE, NULL );
 
         SERVER_START_REQ( get_thread_context )
         {

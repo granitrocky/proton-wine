@@ -48,7 +48,8 @@ static void xdg_surface_handle_configure(void *private, struct xdg_surface *xdg_
 
     /* Handle this event only if wayland_surface is still associated with
      * the target xdg_surface. */
-    if ((surface = data->wayland_surface) && surface->xdg_surface == xdg_surface)
+    if ((surface = data->wayland_surface) && wayland_surface_is_toplevel(surface) &&
+        surface->xdg_surface == xdg_surface)
     {
         /* If we have a previously requested config, we have already sent a
          * WM_WAYLAND_CONFIGURE which hasn't been handled yet. In that case,
@@ -116,7 +117,7 @@ static void xdg_toplevel_handle_configure(void *private,
 
     if (!(data = wayland_win_data_get(hwnd))) return;
 
-    if ((surface = data->wayland_surface) && surface->xdg_toplevel == xdg_toplevel)
+    if ((surface = data->wayland_surface) && wayland_surface_is_toplevel(surface))
     {
         surface->pending.width = width;
         surface->pending.height = height;
@@ -135,6 +136,50 @@ static const struct xdg_toplevel_listener xdg_toplevel_listener =
 {
     xdg_toplevel_handle_configure,
     xdg_toplevel_handle_close
+};
+
+static void wp_fractional_scale_handle_scale(void *user_data,
+        struct wp_fractional_scale_v1 *fractional_scale_v1, uint32_t scale)
+{
+    struct wayland_win_data *data;
+    struct wayland_surface *surface;
+    HWND hwnd = user_data;
+
+    if ((data = wayland_win_data_get(hwnd)))
+    {
+        if ((surface = data->wayland_surface))
+        {
+            surface->window.fractional_scale = scale / 120.0;
+            surface->window.scale = surface->window.fractional_scale;
+
+            TRACE("Got scale %lf\n", surface->window.fractional_scale);
+        }
+
+        wayland_win_data_release(data);
+    }
+
+    NtUserExposeWindowSurface(hwnd, 0, NULL, 0);
+}
+
+static const struct wp_fractional_scale_v1_listener wp_fractional_scale_listener =
+{
+    wp_fractional_scale_handle_scale
+};
+
+static void wl_surface_handle_enter(void *user_data, struct wl_surface *wl_surface, struct wl_output *wl_output)
+{
+    TRACE("surface %p output %p\n", wl_surface, wl_output);
+}
+
+static void wl_surface_handle_leave(void *user_data, struct wl_surface *wl_surface, struct wl_output *wl_output)
+{
+    TRACE("surface %p output %p\n", wl_surface, wl_output);
+}
+
+static const struct wl_surface_listener wl_surface_listener =
+{
+    wl_surface_handle_enter,
+    wl_surface_handle_leave
 };
 
 /**********************************************************************
@@ -162,6 +207,7 @@ struct wayland_surface *wayland_surface_create(HWND hwnd)
         ERR("Failed to create wl_surface Wayland surface\n");
         goto err;
     }
+    wl_surface_add_listener(surface->wl_surface, &wl_surface_listener, hwnd);
     wl_surface_set_user_data(surface->wl_surface, hwnd);
 
     surface->wp_viewport =
@@ -173,6 +219,8 @@ struct wayland_surface *wayland_surface_create(HWND hwnd)
         goto err;
     }
 
+    /* in case we don't get notification */
+    surface->window.fractional_scale = 1.0;
     surface->window.scale = 1.0;
 
     return surface;
@@ -203,6 +251,11 @@ void wayland_surface_destroy(struct wayland_surface *surface)
     if (process_wayland.keyboard.focused_hwnd == surface->hwnd)
         process_wayland.keyboard.focused_hwnd = NULL;
     pthread_mutex_unlock(&process_wayland.keyboard.mutex);
+
+    pthread_mutex_lock(&process_wayland.text_input.mutex);
+    if (process_wayland.text_input.focused_hwnd == surface->hwnd)
+        process_wayland.text_input.focused_hwnd = NULL;
+    pthread_mutex_unlock(&process_wayland.text_input.mutex);
 
     wayland_surface_clear_role(surface);
 
@@ -252,12 +305,52 @@ void wayland_surface_make_toplevel(struct wayland_surface *surface)
     if (process_name)
         xdg_toplevel_set_app_id(surface->xdg_toplevel, process_name);
 
-    wl_surface_commit(surface->wl_surface);
-    wl_display_flush(process_wayland.wl_display);
+    if (process_wayland.xdg_toplevel_tag_manager_v1)
+    {
+        xdg_toplevel_tag_manager_v1_set_toplevel_tag(
+            process_wayland.xdg_toplevel_tag_manager_v1, surface->xdg_toplevel,
+            "proton-game"
+        );
+        xdg_toplevel_tag_manager_v1_set_toplevel_description(
+            process_wayland.xdg_toplevel_tag_manager_v1, surface->xdg_toplevel,
+            "A game running through proton"
+        );
+    }
+
+    if (process_wayland.wp_content_type_manager_v1)
+    {
+        TRACE("using game content type on toplevel\n");
+        surface->wp_content_type_v1 =
+        wp_content_type_manager_v1_get_surface_content_type(
+            process_wayland.wp_content_type_manager_v1, surface->wl_surface);
+        if (!surface->wp_content_type_v1) goto err;
+        wp_content_type_v1_set_content_type(
+            surface->wp_content_type_v1, WP_CONTENT_TYPE_V1_TYPE_GAME);
+    }
+
+    if (process_wayland.wp_fractional_scale_manager_v1)
+    {
+        surface->wp_fractional_scale_v1 =
+            wp_fractional_scale_manager_v1_get_fractional_scale(
+                process_wayland.wp_fractional_scale_manager_v1,
+                surface->wl_surface);
+        if (!surface->wp_fractional_scale_v1)
+        {
+            ERR("Failed to create toplevel wp_fractional_scale_v1\n");
+            goto err;
+        }
+        wp_fractional_scale_v1_add_listener(
+            surface->wp_fractional_scale_v1,
+            &wp_fractional_scale_listener,
+            surface->hwnd);
+    }
 
     if (!NtUserInternalGetWindowText(surface->hwnd, text, ARRAY_SIZE(text)))
         text[0] = 0;
     wayland_surface_set_title(surface, text);
+
+    wl_surface_commit(surface->wl_surface);
+    wl_display_flush(process_wayland.wl_display);
 
     return;
 
@@ -292,6 +385,23 @@ void wayland_surface_make_subsurface(struct wayland_surface *surface,
         goto err;
     }
 
+    if (process_wayland.wp_fractional_scale_manager_v1)
+    {
+        surface->wp_fractional_scale_v1 =
+            wp_fractional_scale_manager_v1_get_fractional_scale(
+                process_wayland.wp_fractional_scale_manager_v1,
+                surface->wl_surface);
+        if (!surface->wp_fractional_scale_v1)
+        {
+            ERR("Failed to create client wp_fractional_scale_v1\n");
+            goto err;
+        }
+        wp_fractional_scale_v1_add_listener(
+            surface->wp_fractional_scale_v1,
+            &wp_fractional_scale_listener,
+            surface->hwnd);
+    }
+
     surface->role = WAYLAND_SURFACE_ROLE_SUBSURFACE;
     surface->toplevel_hwnd = parent->hwnd;
 
@@ -324,6 +434,33 @@ void wayland_surface_clear_role(struct wayland_surface *surface)
         break;
 
     case WAYLAND_SURFACE_ROLE_TOPLEVEL:
+        if (surface->xdg_toplevel_icon)
+        {
+            xdg_toplevel_icon_manager_v1_set_icon(
+                process_wayland.xdg_toplevel_icon_manager_v1,
+                surface->xdg_toplevel, NULL);
+            xdg_toplevel_icon_v1_destroy(surface->xdg_toplevel_icon);
+            if (surface->big_icon_buffer)
+                wayland_shm_buffer_unref(surface->big_icon_buffer);
+            if (surface->small_icon_buffer)
+                wayland_shm_buffer_unref(surface->small_icon_buffer);
+            surface->big_icon_buffer = NULL;
+            surface->small_icon_buffer = NULL;
+            surface->xdg_toplevel_icon = NULL;
+        }
+
+        if (surface->wp_fractional_scale_v1)
+        {
+            wp_fractional_scale_v1_destroy(surface->wp_fractional_scale_v1);
+            surface->wp_fractional_scale_v1 = NULL;
+        }
+
+        if (surface->wp_content_type_v1)
+        {
+            wp_content_type_v1_destroy(surface->wp_content_type_v1);
+            surface->wp_content_type_v1 = NULL;
+        }
+
         if (surface->xdg_toplevel)
         {
             xdg_toplevel_destroy(surface->xdg_toplevel);
@@ -342,6 +479,12 @@ void wayland_surface_clear_role(struct wayland_surface *surface)
         {
             wl_subsurface_destroy(surface->wl_subsurface);
             surface->wl_subsurface = NULL;
+        }
+
+        if (surface->wp_fractional_scale_v1)
+        {
+            wp_fractional_scale_v1_destroy(surface->wp_fractional_scale_v1);
+            surface->wp_fractional_scale_v1 = NULL;
         }
 
         surface->toplevel_hwnd = 0;
@@ -532,6 +675,25 @@ static void wayland_surface_reconfigure_geometry(struct wayland_surface *surface
                                         rect.left, rect.top,
                                         rect.right - rect.left,
                                         rect.bottom - rect.top);
+        /* HACK: reset fullscreen state to ensure surface is on correct output */
+        if (wayland_surface_is_toplevel(surface) &&
+            surface->current.state & WAYLAND_SURFACE_CONFIG_STATE_FULLSCREEN)
+        {
+            struct wl_output *output;
+            pthread_mutex_lock(&process_wayland.output_mutex);
+            output = wayland_get_best_output_for_rect(&surface->window.rect);
+            if (output != surface->requested_output)
+            {
+                TRACE("Updating fullscreen output: output %p, old output %p\n",
+                    output, surface->requested_output);
+                xdg_toplevel_unset_fullscreen(surface->xdg_toplevel);
+                wl_display_flush(process_wayland.wl_display);
+                xdg_toplevel_set_fullscreen(surface->xdg_toplevel, output);
+                wl_display_flush(process_wayland.wl_display);
+                surface->requested_output = output;
+            }
+            pthread_mutex_unlock(&process_wayland.output_mutex);
+        }
     }
 }
 
@@ -629,6 +791,7 @@ static BOOL wayland_surface_reconfigure_xdg(struct wayland_surface *surface,
                                                    width, height,
                                                    window->state))
     {
+        WARN("Failed to configure surface %p\n", surface);
         return FALSE;
     }
 
@@ -781,6 +944,7 @@ struct wayland_shm_buffer *wayland_shm_buffer_create(int width, int height,
     shm_buffer->ref = 1;
     shm_buffer->width = width;
     shm_buffer->height = height;
+    shm_buffer->format = format;
     shm_buffer->map_size = size;
 
     shm_buffer->damage_region = NtGdiCreateRectRgn(0, 0, width, height);
@@ -846,6 +1010,147 @@ err:
     return NULL;
 }
 
+/***********************************************************************
+ *           copy_rectangle_into_center_of_square
+ *
+ * Copies non-square rectangle src to the center of square dest.
+ */
+static void copy_rectangle_into_center_of_square(const unsigned int *src,
+                                                 int src_w, int src_h,
+                                                 unsigned int *dest)
+{
+    int dest_length;
+
+    if (src_w > src_h)
+    {
+        dest += src_w * (src_w - src_h) / 2;
+        dest_length = src_w;
+    }
+    else
+    {
+        dest += (src_h - src_w) / 2;
+        dest_length = src_h;
+    }
+
+    for (int h = 0; h < src_h; h++, dest += dest_length, src += src_w)
+        memcpy(dest, src, src_w * 4);
+}
+
+/***********************************************************************
+ *           wayland_shm_buffer_from_color_bitmaps
+ *
+ * Create a wayland_shm_buffer for a color bitmap.
+ *
+ * Adapted from wineandroid.drv code.
+ */
+struct wayland_shm_buffer *wayland_shm_buffer_from_color_bitmaps(HDC hdc, HBITMAP color,
+                                                                 HBITMAP mask,
+                                                                 BOOL allow_padding)
+{
+    struct wayland_shm_buffer *shm_buffer = NULL;
+    char buffer[FIELD_OFFSET(BITMAPINFO, bmiColors[256])];
+    BITMAPINFO *info = (BITMAPINFO *)buffer;
+    BITMAP bm;
+    unsigned int *ptr, *bits = NULL;
+    unsigned char *mask_bits = NULL;
+    int i, j, square_length;
+    BOOL has_alpha = FALSE, use_padding = FALSE;
+
+    if (!NtGdiExtGetObjectW(color, sizeof(bm), &bm)) goto failed;
+
+    info->bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    info->bmiHeader.biWidth = bm.bmWidth;
+    info->bmiHeader.biHeight = -bm.bmHeight;
+    info->bmiHeader.biPlanes = 1;
+    info->bmiHeader.biBitCount = 32;
+    info->bmiHeader.biCompression = BI_RGB;
+    info->bmiHeader.biSizeImage = bm.bmWidth * bm.bmHeight * 4;
+    info->bmiHeader.biXPelsPerMeter = 0;
+    info->bmiHeader.biYPelsPerMeter = 0;
+    info->bmiHeader.biClrUsed = 0;
+    info->bmiHeader.biClrImportant = 0;
+
+    use_padding = allow_padding && bm.bmWidth != bm.bmHeight;
+
+    if (use_padding)
+    {
+        square_length = max(bm.bmWidth, bm.bmHeight);
+        shm_buffer = wayland_shm_buffer_create(square_length, square_length,
+                                               WL_SHM_FORMAT_ARGB8888);
+        if (!shm_buffer) goto failed;
+        if (!(bits = malloc(info->bmiHeader.biSizeImage))) goto failed;
+    }
+    else
+    {
+        shm_buffer = wayland_shm_buffer_create(bm.bmWidth, bm.bmHeight,
+                                               WL_SHM_FORMAT_ARGB8888);
+        if (!shm_buffer) goto failed;
+        bits = shm_buffer->map_data;
+    }
+
+    if (!NtGdiGetDIBitsInternal(hdc, color, 0, bm.bmHeight, bits, info,
+                                DIB_RGB_COLORS, 0, 0))
+        goto failed;
+
+    for (i = 0; i < bm.bmWidth * bm.bmHeight; i++)
+        if ((has_alpha = (bits[i] & 0xff000000) != 0)) break;
+
+    if (!has_alpha)
+    {
+        unsigned int width_bytes = (bm.bmWidth + 31) / 32 * 4;
+        /* generate alpha channel from the mask */
+        info->bmiHeader.biBitCount = 1;
+        info->bmiHeader.biSizeImage = width_bytes * bm.bmHeight;
+        if (!(mask_bits = malloc(info->bmiHeader.biSizeImage))) goto failed;
+        if (!NtGdiGetDIBitsInternal(hdc, mask, 0, bm.bmHeight, mask_bits,
+                                    info, DIB_RGB_COLORS, 0, 0))
+            goto failed;
+        ptr = bits;
+        for (i = 0; i < bm.bmHeight; i++)
+        {
+            for (j = 0; j < bm.bmWidth; j++, ptr++)
+            {
+                if (!((mask_bits[i * width_bytes + j / 8] << (j % 8)) & 0x80))
+                    *ptr |= 0xff000000;
+            }
+        }
+        free(mask_bits);
+    }
+
+    if (use_padding)
+    {
+        copy_rectangle_into_center_of_square(bits, bm.bmWidth,
+                                             bm.bmHeight, shm_buffer->map_data);
+        free(bits);
+        bits = shm_buffer->map_data;
+    }
+
+    /* Wayland requires pre-multiplied alpha values */
+    for (ptr = bits, i = 0; i < shm_buffer->width * shm_buffer->height; ptr++, i++)
+    {
+        unsigned char alpha = *ptr >> 24;
+        if (alpha == 0)
+        {
+            *ptr = 0;
+        }
+        else if (alpha != 255)
+        {
+            *ptr = (alpha << 24) |
+                   (((BYTE)(*ptr >> 16) * alpha / 255) << 16) |
+                   (((BYTE)(*ptr >> 8) * alpha / 255) << 8) |
+                   (((BYTE)*ptr * alpha / 255));
+        }
+    }
+
+    return shm_buffer;
+
+failed:
+    if (shm_buffer) wayland_shm_buffer_unref(shm_buffer);
+    if (use_padding) free(bits);
+    free(mask_bits);
+    return NULL;
+}
+
 /**********************************************************************
  *          wayland_surface_coords_from_window
  *
@@ -879,6 +1184,8 @@ BOOL wayland_client_surface_release(struct wayland_client_surface *client)
 {
     if (InterlockedDecrement(&client->ref)) return FALSE;
 
+    if (client->wp_content_type_v1)
+        wp_content_type_v1_destroy(client->wp_content_type_v1);
     if (client->wp_viewport)
         wp_viewport_destroy(client->wp_viewport);
     if (client->wl_subsurface)
@@ -930,6 +1237,18 @@ struct wayland_client_surface *wayland_client_surface_create(HWND hwnd)
     {
         ERR("Failed to create client wp_viewport\n");
         goto err;
+    }
+
+    if (process_wayland.wp_content_type_manager_v1)
+    {
+        TRACE("setting game content on client surface!\n");
+        client->wp_content_type_v1 =
+            wp_content_type_manager_v1_get_surface_content_type(
+                process_wayland.wp_content_type_manager_v1,
+                client->wl_surface
+            );
+        wp_content_type_v1_set_content_type(client->wp_content_type_v1,
+                                            WP_CONTENT_TYPE_V1_TYPE_GAME);
     }
 
     return client;
@@ -1060,7 +1379,7 @@ void wayland_surface_set_title(struct wayland_surface *surface, LPCWSTR text)
     DWORD utf8_count;
     char *utf8 = NULL;
 
-    assert(surface->xdg_toplevel);
+    assert(wayland_surface_is_toplevel(surface));
 
     TRACE("surface=%p hwnd=%p text='%s'\n",
           surface, surface->hwnd, wine_dbgstr_w(text));
@@ -1075,4 +1394,110 @@ void wayland_surface_set_title(struct wayland_surface *surface, LPCWSTR text)
     }
 
     free(utf8);
+}
+
+/**********************************************************************
+ *          wayland_surface_set_icon
+ */
+void wayland_surface_set_icon(struct wayland_surface *surface, UINT type, ICONINFO *ii)
+{
+    HDC hDC;
+    struct wayland_shm_buffer *icon_buf;
+
+    assert(ii);
+    assert(wayland_surface_is_toplevel(surface));
+
+    hDC = NtGdiCreateCompatibleDC(0);
+    icon_buf = wayland_shm_buffer_from_color_bitmaps(hDC, ii->hbmColor, ii->hbmMask, TRUE);
+    NtGdiDeleteObjectApp(hDC);
+
+    if (surface->xdg_toplevel_icon)
+    {
+        xdg_toplevel_icon_manager_v1_set_icon(process_wayland.xdg_toplevel_icon_manager_v1,
+                                              surface->xdg_toplevel, NULL);
+        xdg_toplevel_icon_v1_destroy(surface->xdg_toplevel_icon);
+        if (surface->big_icon_buffer && type == ICON_BIG)
+        {
+            wayland_shm_buffer_unref(surface->big_icon_buffer);
+            surface->big_icon_buffer = NULL;
+        }
+        else if (surface->small_icon_buffer && type != ICON_BIG)
+        {
+            wayland_shm_buffer_unref(surface->small_icon_buffer);
+            surface->small_icon_buffer = NULL;
+        }
+        surface->xdg_toplevel_icon = NULL;
+    }
+
+    if (icon_buf)
+    {
+        surface->xdg_toplevel_icon =
+            xdg_toplevel_icon_manager_v1_create_icon(process_wayland.xdg_toplevel_icon_manager_v1);
+
+        if (type == ICON_BIG) surface->big_icon_buffer = icon_buf;
+        else surface->small_icon_buffer = icon_buf;
+
+        /* FIXME: what to do with scale ? */
+        if (surface->big_icon_buffer)
+        {
+            xdg_toplevel_icon_v1_add_buffer(surface->xdg_toplevel_icon,
+                                            surface->big_icon_buffer->wl_buffer, 1);
+        }
+        if (surface->small_icon_buffer)
+        {
+            xdg_toplevel_icon_v1_add_buffer(surface->xdg_toplevel_icon,
+                                            surface->small_icon_buffer->wl_buffer, 1);
+        }
+
+        xdg_toplevel_icon_v1_set_name(surface->xdg_toplevel_icon, process_name ? process_name : "");
+
+        xdg_toplevel_icon_manager_v1_set_icon(process_wayland.xdg_toplevel_icon_manager_v1,
+                                              surface->xdg_toplevel, surface->xdg_toplevel_icon);
+    }
+}
+
+static void xdg_activation_token_handle_done(void *user_data,
+                                             struct xdg_activation_token_v1 *xdg_activation_token_v1,
+                                             const char *token)
+{
+    HWND hwnd = user_data;
+    struct wayland_win_data *data;
+
+
+    if ((data = wayland_win_data_get(hwnd)))
+    {
+        if (data->wayland_surface)
+            xdg_activation_v1_activate(process_wayland.xdg_activation_v1,
+                                       token, data->wayland_surface->wl_surface);
+        wayland_win_data_release(data);
+    }
+
+    xdg_activation_token_v1_destroy(xdg_activation_token_v1);
+}
+
+const static struct xdg_activation_token_v1_listener xdg_activation_listener = {
+    xdg_activation_token_handle_done
+};
+
+void wayland_surface_set_activation(struct wayland_surface *surface, BOOL activate)
+{
+    struct xdg_activation_token_v1 *xdg_activation_token_v1;
+    assert(surface);
+
+    if (activate && process_wayland.xdg_activation_v1)
+    {
+        xdg_activation_token_v1 =
+            xdg_activation_v1_get_activation_token(process_wayland.xdg_activation_v1);
+
+        if (!xdg_activation_token_v1)
+        {
+            ERR("Failed to create activation token!\n");
+            return;
+        }
+
+        xdg_activation_token_v1_add_listener(xdg_activation_token_v1,
+                                             &xdg_activation_listener, surface->hwnd);
+        xdg_activation_token_v1_set_surface(xdg_activation_token_v1, surface->wl_surface);
+        xdg_activation_token_v1_commit(xdg_activation_token_v1);
+    }
 }

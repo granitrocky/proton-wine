@@ -44,7 +44,7 @@
  *         syscalls
  */
 #define SYSCALL_ENTRY(id,name,args) __ASM_SYSCALL_FUNC( id, name )
-ALL_SYSCALLS64
+ALL_SYSCALLS
 #undef SYSCALL_ENTRY
 
 
@@ -893,6 +893,14 @@ BOOLEAN WINAPI RtlIsProcessorFeaturePresent( UINT feature )
 }
 
 
+static LONG WINAPI walk_frame_chain_handler( EXCEPTION_POINTERS *eptr )
+{
+    if (eptr->ExceptionRecord->ExceptionCode == STATUS_ACCESS_VIOLATION)
+        return EXCEPTION_EXECUTE_HANDLER;
+
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+
 /*************************************************************************
  *		RtlWalkFrameChain (NTDLL.@)
  */
@@ -907,18 +915,28 @@ ULONG WINAPI RtlWalkFrameChain( void **buffer, ULONG count, ULONG flags )
     ULONG i, skip = flags >> 8, num_entries = 0;
 
     RtlCaptureContext( &context );
-
-    for (i = 0; i < count; i++)
+    __TRY
     {
-        func = RtlLookupFunctionEntry( context.Rip, &base, &table );
-        if (RtlVirtualUnwind2( UNW_FLAG_NHANDLER, base, context.Rip, func, &context, NULL,
-                               &data, &frame, NULL, NULL, NULL, &handler, 0 ))
-            break;
-        if (!context.Rip) break;
-        if (!frame || !is_valid_frame( frame )) break;
-        if (context.Rsp == (ULONG_PTR)NtCurrentTeb()->Tib.StackBase) break;
-        if (i >= skip) buffer[num_entries++] = (void *)context.Rip;
+    for (i = 0; i < count; i++)
+        {
+            func = RtlLookupFunctionEntry( context.Rip, &base, &table );
+            if (!func) break;
+            if (RtlVirtualUnwind2( UNW_FLAG_NHANDLER, base, context.Rip, func, &context, NULL,
+                                &data, &frame, NULL, NULL, NULL, &handler, 0 ))
+                break;
+            if (!context.Rip) break;
+            if (!frame || !is_valid_frame( frame )) break;
+            if (context.Rsp == (ULONG_PTR)NtCurrentTeb()->Tib.StackBase) break;
+            if (i >= skip) buffer[num_entries++] = (void *)context.Rip;
+        }
     }
+    __EXCEPT(walk_frame_chain_handler)
+    {
+        TRACE( "access violation when unwinding with context.Rip %p\n", (void *)context.Rip );
+	return 0;
+    }
+    __ENDTRY
+
     return num_entries;
 }
 
