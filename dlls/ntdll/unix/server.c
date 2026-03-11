@@ -1376,10 +1376,17 @@ static int setup_config_dir(void)
 
     if (!mkdir( "dosdevices", 0777 ))
     {
+#ifdef __ANDROID__
+        mkdir( "drive_d", 0777 );
+        symlink( "../drive_c", "dosdevices/c:" );
+        symlink( "/storage/emulated/0/", "dosdevices/d:" );
+        symlink( "/data/data/app.gamenative/files/imagefs/", "dosdevices/z:" );
+#else
         mkdir( "drive_c", 0777 );
         set_case_insensitive( "drive_c" );
         symlink( "../drive_c", "dosdevices/c:" );
         symlink( "/", "dosdevices/z:" );
+#endif
     }
     else if (errno != EEXIST) fatal_perror( "cannot create %s/dosdevices", config_dir );
 
